@@ -33,7 +33,7 @@ exports.start = () => {
       process.exit(-1)
     }
 
-    console.log(`${config.app} is running on ${config.port}`)
+    console.log(`${config.app} is running on http://localhost:${config.port}`)
   })
 }
 

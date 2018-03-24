@@ -3,30 +3,53 @@ const mongoose = require('mongoose')
 const bcrypt = require('bcrypt-nodejs')
 const httpStatus = require('http-status')
 const APIError = require('../utils/APIError')
+const config = require('../config')
+const jwt = require('jsonwebtoken')
+const moment = require('moment')
 const Schema = mongoose.Schema
 
 const roles = [ 'nurse', 'doctor', 'admin' ]
+const genders = [ 'male', 'female' ]
+const titles = [ 'mr', 'mrs', 'miss', 'ms' ]
 
 const userSchema = new Schema({
-  email: {
+  nic: {
     type: String,
     required: true,
     unique: true,
-    lowercase: true
+    lowercase: true,
+    minlength: 10,
+    maxlength: 12
   },
   password: {
     type: String,
     required: true,
-    minlength: 4,
-    maxlength: 128
+    minlength: 6,
+    maxlength: 50
   },
   name: {
     type: String,
-    maxlength: 50
+    required: true,
+    maxlength: 150
+  },
+  registerID: {
+    type: String,
+    default: ''
+  },
+  contacts: [{type: String}],
+  gender: {
+    type: String,
+    enum: genders,
+    required: true
+  },
+  title: {
+    type: String,
+    enum: titles,
+    required: true
   },
   role: {
     type: String,
-    default: 'user',
+    default: 'admin',
     enum: roles
   }
 }, {
@@ -39,7 +62,7 @@ userSchema.pre('save', async function save (next) {
       return next()
     }
 
-    this.password = bcrypt.hashSync(this.password)
+    this.password = bcrypt.hashSync(this.password) // replace with async version
 
     return next()
   } catch (error) {
@@ -50,7 +73,7 @@ userSchema.pre('save', async function save (next) {
 userSchema.method({
   transform () {
     const transformed = {}
-    const fields = ['id', 'name', 'email', 'createdAt', 'role']
+    const fields = ['id', 'name', 'nic', 'createdAt', 'role', 'registerID', 'contacts', 'gender', 'title']
 
     fields.forEach((field) => {
       transformed[field] = this[field]
@@ -61,19 +84,33 @@ userSchema.method({
 
   passwordMatches (password) {
     return bcrypt.compareSync(password, this.password)
+  },
+
+  token () {
+    const payload = {
+      exp: moment().add(config.tokenExpiration, 'hours').unix(),
+      iat: moment().unix(),
+      sub: this._id
+    }
+
+    return jwt.sign(payload, config.secret)
   }
 })
 
 userSchema.statics = {
   roles,
 
-  checkDuplicateEmailError (err) {
+  genders,
+
+  titles,
+
+  checkDuplicateNicError (err) {
     if (err.code === 11000) {
-      var error = new Error('Email already taken')
+      var error = new Error('Nic already taken')
       error.errors = [{
-        field: 'email',
+        field: 'nic',
         location: 'body',
-        messages: ['Email already taken']
+        messages: ['Nic already taken']
       }]
       error.status = httpStatus.CONFLICT
       return error
@@ -83,18 +120,53 @@ userSchema.statics = {
   },
 
   async findAndGenerateToken (payload) {
-    const { email, password } = payload
-    if (!email) throw new APIError('Email must be provided for login')
+    const { nic, password, refreshObject } = payload
 
-    const user = await this.findOne({ email }).exec()
-    if (!user) throw new APIError(`No user associated with ${email}`, httpStatus.NOT_FOUND)
+    // lets issue token if refreshObject is present
+    if (refreshObject) {
+      const user = await User.findOne({userID: refreshObject.userID})
+
+      if (!user) throw new APIError(`Invalid token`, httpStatus.UNAUTHORIZED)
+
+      return { user: user, accessToken: user.token() }
+    }
+
+    if (!nic) throw new APIError('Nic must be provided for login')
+
+    const user = await this.findOne({ nic }).exec()
+    if (!user) throw new APIError(`No user associated with ${nic}`, httpStatus.NOT_FOUND)
 
     const passwordOK = await user.passwordMatches(password)
 
     if (!passwordOK) throw new APIError(`Password mismatch`, httpStatus.UNAUTHORIZED)
 
-    return user
+    return { user: user, accessToken: user.token() }
+  },
+
+  async list ({page = 1, perPage = 30}) {
+    page = Number(page)
+    perPage = Number(perPage)
+
+    if (!page || page <= 0) throw new APIError('Invalid page')
+    if (!perPage || (perPage <= 0 && perPage !== -1)) throw new APIError('Invalid perPage')
+
+    let results = null
+    if (perPage === -1) {
+      results = await User.find().sort({'createdAt': -1})
+    } else {
+      results = await User.find()
+        .limit(perPage)
+        .skip(perPage * (page - 1))
+        .sort({'createdAt': -1})
+    }
+
+    const users = results.map((result) => result.transform())
+    const total = await User.count()
+    const pages = Math.ceil(total / perPage)
+
+    return {users, pages, page, perPage, total}
   }
 }
 
-module.exports = mongoose.model('User', userSchema)
+const User = mongoose.model('User', userSchema)
+module.exports = User
